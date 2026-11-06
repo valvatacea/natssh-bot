@@ -3,7 +3,12 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 API_URL = os.environ.get("NATSSH_API_URL", "http://127.0.0.1:8099")
-API_TOKEN = os.environ.get("NATSSH_API_TOKEN", "change-me")
+API_TOKEN = os.environ.get("NATSSH_API_TOKEN", "")
+if not API_TOKEN or API_TOKEN == "change-me":
+    try:
+        API_TOKEN = open("/root/natssh/.api_token").read().strip()
+    except Exception:
+        API_TOKEN = "change-me"
 DB_PATH = os.environ.get("BOT_DB", "/root/natssh-bot/bot.db")
 ADMIN_IDS = set(int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x)
 PRICE_30D = int(os.environ.get("PRICE_30D", "5000"))
