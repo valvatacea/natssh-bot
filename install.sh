@@ -1,12 +1,16 @@
 #!/bin/bash
 set -e
+if [ ! -d /root/natssh ] || [ ! -f /root/natssh/menu.sh ]; then
+    echo "natssh belum terpasang. Install natssh terlebih dahulu."
+    exit 1
+fi
 python3 -m venv /opt/natssh-bot 2>/dev/null || true
 /opt/natssh-bot/bin/pip install -r /root/natssh-bot/requirements.txt
 cp /root/natssh-bot/main.py /opt/natssh-bot/main.py
 cat > /etc/systemd/system/natssh-bot.service <<EOF
 [Unit]
 Description=NATSSH Telegram Bot
-After=network.target
+After=network.target natssh-ws.service
 
 [Service]
 EnvironmentFile=/root/natssh-bot/.env
