@@ -1,6 +1,6 @@
 import os, sqlite3, requests, secrets, string
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 API_URL = os.environ.get("NATSSH_API_URL", "http://127.0.0.1:8099")
 API_TOKEN = os.environ.get("NATSSH_API_TOKEN", "")
@@ -51,126 +51,123 @@ def gen_pass(n=12):
     return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
 
 
+def main_menu_kb(user):
+    rows = [
+        [InlineKeyboardButton("Status", callback_data="status"),
+         InlineKeyboardButton("Akun Saya", callback_data="myaccounts")],
+        [InlineKeyboardButton("Buat Akun 30h", callback_data="create_30"),
+         InlineKeyboardButton("Saldo", callback_data="balance")],
+    ]
+    if user and user["role"] in ("admin", "operator"):
+        rows.append([InlineKeyboardButton("Daftar Akun", callback_data="accounts"),
+                     InlineKeyboardButton("Suspend", callback_data="suspend_menu")])
+    if user and user["role"] == "admin":
+        rows.append([InlineKeyboardButton("Topup", callback_data="topup_menu"),
+                     InlineKeyboardButton("Config", callback_data="config_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Halo. Gunakan /help")
+    u = get_user(update.effective_user.id)
+    await update.message.reply_text("Menu utama:", reply_markup=main_menu_kb(u))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/status /accounts /myaccounts /create [days] /balance /topup <tg_id> <amount> /adduser <tg_id> <role>")
+    await update.message.reply_text("Gunakan tombol inline. /start untuk menu.")
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    r = api("/status")
-    await update.message.reply_text(str(r.json()))
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    uid = q.from_user.id
+    u = get_user(uid)
 
-
-async def accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = get_user(update.effective_user.id)
-    if not u or u["role"] not in ("admin", "operator"):
-        await update.message.reply_text("Tidak diizinkan.")
+    if data == "status":
+        r = api("/status")
+        await q.edit_message_text(str(r.json()), reply_markup=main_menu_kb(u))
         return
-    r = api("/accounts")
-    await update.message.reply_text(str(r.json()))
 
-
-async def myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = get_user(update.effective_user.id)
-    if not u:
-        await update.message.reply_text("Belum terdaftar.")
-        return
-    con = db()
-    rows = con.execute("SELECT ssh_user, created_at FROM owned_accounts WHERE user_id=?", (u["id"],)).fetchall()
-    con.close()
-    if not rows:
-        await update.message.reply_text("Belum ada akun.")
-        return
-    await update.message.reply_text("\n".join(f"{r['ssh_user']} ({r['created_at']})" for r in rows))
-
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = get_user(update.effective_user.id)
-    if not u:
-        await update.message.reply_text("Belum terdaftar.")
-        return
-    await update.message.reply_text(f"Saldo: {u['balance']}")
-
-
-async def create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = get_user(update.effective_user.id)
-    if not u:
-        await update.message.reply_text("Belum terdaftar.")
-        return
-    days = 30
-    if context.args:
-        try:
-            days = int(context.args[0])
-        except ValueError:
-            await update.message.reply_text("Usage: /create [days]")
+    if data == "accounts":
+        if not u or u["role"] not in ("admin", "operator"):
+            await q.edit_message_text("Tidak diizinkan.", reply_markup=main_menu_kb(u))
             return
-    price = int(PRICE_30D * (days / 30))
-    if u["balance"] < price:
-        await update.message.reply_text(f"Saldo tidak cukup. Harga: {price}, saldo: {u['balance']}")
+        r = api("/accounts")
+        await q.edit_message_text(str(r.json()), reply_markup=main_menu_kb(u))
         return
-    username = f"u{u['id']}{secrets.randbelow(9999):04d}"
-    password = gen_pass()
-    r = api("/accounts", method="POST", json={"user": username, "password": password, "days": days})
-    if r.status_code != 200:
-        await update.message.reply_text(f"Gagal: {r.text}")
-        return
-    con = db()
-    con.execute("UPDATE users SET balance=balance-? WHERE id=?", (price, u["id"]))
-    con.execute("INSERT INTO transactions (user_id, amount, type, note, created_at) VALUES (?,?,?,?,datetime('now'))",
-                (u["id"], -price, "purchase", f"create {username}"))
-    con.execute("INSERT INTO owned_accounts (user_id, ssh_user, created_at) VALUES (?,?,datetime('now'))",
-                (u["id"], username))
-    con.commit()
-    con.close()
-    await update.message.reply_text(f"Akun dibuat:\nUsername: {username}\nPassword: {password}\nExpired: {days} hari")
 
-
-async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Tidak diizinkan.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /adduser <telegram_id> <role>")
-        return
-    tid = int(context.args[0])
-    role = context.args[1]
-    if role not in ("admin", "operator", "user"):
-        await update.message.reply_text("Role invalid.")
-        return
-    con = db()
-    con.execute("INSERT OR IGNORE INTO users (telegram_id, role, balance) VALUES (?,?,0)", (tid, role))
-    con.execute("UPDATE users SET role=? WHERE telegram_id=?", (role, tid))
-    con.commit()
-    con.close()
-    await update.message.reply_text("OK")
-
-
-async def topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Tidak diizinkan.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /topup <telegram_id> <amount>")
-        return
-    tid = int(context.args[0])
-    amount = int(context.args[1])
-    con = db()
-    row = con.execute("SELECT id FROM users WHERE telegram_id=?", (tid,)).fetchone()
-    if not row:
-        await update.message.reply_text("User tidak ditemukan.")
+    if data == "myaccounts":
+        if not u:
+            await q.edit_message_text("Belum terdaftar.", reply_markup=main_menu_kb(u))
+            return
+        con = db()
+        rows = con.execute("SELECT ssh_user, created_at FROM owned_accounts WHERE user_id=?", (u["id"],)).fetchall()
         con.close()
+        text = "\n".join(f"{r['ssh_user']} ({r['created_at']})" for r in rows) if rows else "Belum ada akun."
+        await q.edit_message_text(text, reply_markup=main_menu_kb(u))
         return
-    uid = row["id"]
-    con.execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, uid))
-    con.execute("INSERT INTO transactions (user_id, amount, type, note, created_at) VALUES (?,?,?,?,datetime('now'))",
-                (uid, amount, "topup", "admin topup"))
-    con.commit()
-    con.close()
-    await update.message.reply_text("OK")
+
+    if data == "balance":
+        if not u:
+            await q.edit_message_text("Belum terdaftar.", reply_markup=main_menu_kb(u))
+            return
+        await q.edit_message_text(f"Saldo: {u['balance']}", reply_markup=main_menu_kb(u))
+        return
+
+    if data.startswith("create_"):
+        if not u:
+            await q.edit_message_text("Belum terdaftar.", reply_markup=main_menu_kb(u))
+            return
+        days = int(data.split("_")[1])
+        price = int(PRICE_30D * (days / 30))
+        if u["balance"] < price:
+            await q.edit_message_text(f"Saldo tidak cukup. Harga: {price}, saldo: {u['balance']}",
+                                     reply_markup=main_menu_kb(u))
+            return
+        username = f"u{u['id']}{secrets.randbelow(9999):04d}"
+        password = gen_pass()
+        r = api("/accounts", method="POST", json={"user": username, "password": password, "days": days})
+        if r.status_code != 200:
+            await q.edit_message_text(f"Gagal: {r.text}", reply_markup=main_menu_kb(u))
+            return
+        con = db()
+        con.execute("UPDATE users SET balance=balance-? WHERE id=?", (price, u["id"]))
+        con.execute("INSERT INTO transactions (user_id, amount, type, note, created_at) VALUES (?,?,?,?,datetime('now'))",
+                    (u["id"], -price, "purchase", f"create {username}"))
+        con.execute("INSERT INTO owned_accounts (user_id, ssh_user, created_at) VALUES (?,?,datetime('now'))",
+                    (u["id"], username))
+        con.commit()
+        con.close()
+        await q.edit_message_text(f"Akun dibuat:\nUsername: {username}\nPassword: {password}\nExpired: {days} hari",
+                                 reply_markup=main_menu_kb(u))
+        return
+
+    if data == "suspend_menu":
+        if not u or u["role"] not in ("admin", "operator"):
+            await q.edit_message_text("Tidak diizinkan.", reply_markup=main_menu_kb(u))
+            return
+        await q.edit_message_text("Kirim: /suspend <user>", reply_markup=main_menu_kb(u))
+        return
+
+    if data == "topup_menu":
+        if not u or u["role"] != "admin":
+            await q.edit_message_text("Tidak diizinkan.", reply_markup=main_menu_kb(u))
+            return
+        await q.edit_message_text("Kirim: /topup <telegram_id> <amount>", reply_markup=main_menu_kb(u))
+        return
+
+    if data == "config_menu":
+        if not u or u["role"] != "admin":
+            await q.edit_message_text("Tidak diizinkan.", reply_markup=main_menu_kb(u))
+            return
+        await q.edit_message_text("Config via API/command.", reply_markup=main_menu_kb(u))
+        return
+
+    await q.edit_message_text("Unknown action.", reply_markup=main_menu_kb(u))
+
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
 
 
 def main():
@@ -179,15 +176,9 @@ def main():
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("accounts", accounts))
-    app.add_handler(CommandHandler("myaccounts", myaccounts))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("create", create))
-    app.add_handler(CommandHandler("adduser", adduser))
-    app.add_handler(CommandHandler("topup", topup))
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", start_cmd))
+    app.add_handler(CallbackQueryHandler(callback))
     app.run_polling()
 
 
