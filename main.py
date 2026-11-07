@@ -27,6 +27,8 @@ def init_db():
         id INTEGER PRIMARY KEY, telegram_id INTEGER UNIQUE, role TEXT, balance INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY, user_id INTEGER, amount INTEGER, type TEXT, note TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS topup_requests (
+        id INTEGER PRIMARY KEY, user_id INTEGER, code TEXT, amount INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', created_at TEXT);
     CREATE TABLE IF NOT EXISTS owned_accounts (
         id INTEGER PRIMARY KEY, user_id INTEGER, ssh_user TEXT, created_at TEXT);
     """)
@@ -67,6 +69,7 @@ def main_menu_kb(user):
     rows = [
         [InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("➕ Buat Akun", callback_data="create_30")],
+        [InlineKeyboardButton("💳 Topup", callback_data="topup_request")],
         [InlineKeyboardButton("💰 Saldo", callback_data="balance")],
     ]
     if user and user["role"] in ("admin", "operator"):
@@ -111,6 +114,57 @@ async def topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = con.execute("SELECT balance FROM users WHERE telegram_id=?", (target_tid,)).fetchone()
     con.close()
     await update.message.reply_text(f"Topup OK. Saldo {target_tid}: {row['balance']}")
+
+
+async def topup_requests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    u = get_user(tid)
+    if not u or u["role"] != "admin":
+        await update.message.reply_text("Tidak diizinkan.")
+        return
+    con = db()
+    rows = con.execute("SELECT id, user_id, code, status, created_at FROM topup_requests WHERE status='pending' ORDER BY id").fetchall()
+    con.close()
+    if not rows:
+        await update.message.reply_text("Tidak ada request pending.")
+        return
+    text = "\n".join(f"#{r['id']} user={r['user_id']} code={r['code']} ({r['created_at']})" for r in rows)
+    await update.message.reply_text(text)
+
+
+async def approve_topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    u = get_user(tid)
+    if not u or u["role"] != "admin":
+        await update.message.reply_text("Tidak diizinkan.")
+        return
+    if not context.args or len(context.args) != 2:
+        await update.message.reply_text("Usage: /approve_topup <request_id> <amount>")
+        return
+    try:
+        req_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("request_id dan amount harus angka.")
+        return
+    if amount <= 0:
+        await update.message.reply_text("Amount harus > 0.")
+        return
+    con = db()
+    req = con.execute("SELECT * FROM topup_requests WHERE id=? AND status='pending'", (req_id,)).fetchone()
+    if not req:
+        con.close()
+        await update.message.reply_text("Request tidak ditemukan/pending.")
+        return
+    target_tid = con.execute("SELECT telegram_id FROM users WHERE id=?", (req["user_id"],)).fetchone()["telegram_id"]
+    con.execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, req["user_id"]))
+    con.execute("UPDATE topup_requests SET amount=?, status='approved' WHERE id=?", (amount, req_id))
+    con.execute("INSERT INTO transactions (user_id, amount, type, note, created_at) VALUES (?,?,?,?,datetime('now'))",
+                (req["user_id"], amount, "topup", f"approve {req_id} code={req['code']}"))
+    con.commit()
+    row = con.execute("SELECT balance FROM users WHERE id=?", (req["user_id"],)).fetchone()
+    con.close()
+    await update.message.reply_text(f"Approved #{req_id}. Saldo user {target_tid}: {row['balance']}")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,6 +258,21 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Config via API/command.", reply_markup=main_menu_kb(u))
         return
 
+    if data == "topup_request":
+        if not u:
+            await q.edit_message_text("Belum terdaftar.", reply_markup=main_menu_kb(u))
+            return
+        code = f"TP{u['id']}{secrets.randbelow(999999):06d}"
+        con = db()
+        con.execute("INSERT INTO topup_requests (user_id, code, status, created_at) VALUES (?,?, 'pending', datetime('now'))",
+                    (u["id"], code))
+        con.commit()
+        con.close()
+        await q.edit_message_text(
+            f"Topup mandiri:\n1) Transfer ke QRIS statis.\n2) Kode unik: {code}\n3) Kirim bukti ke admin.\nAdmin akan approve dengan /approve_topup <id> <amount>.",
+            reply_markup=main_menu_kb(u))
+        return
+
     await q.edit_message_text("Unknown action.", reply_markup=main_menu_kb(u))
 
 
@@ -220,6 +289,8 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("topup", topup_cmd))
+    app.add_handler(CommandHandler("topup_requests", topup_requests_cmd))
+    app.add_handler(CommandHandler("approve_topup", approve_topup_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.run_polling()
 
