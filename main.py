@@ -54,7 +54,6 @@ def gen_pass(n=12):
 def main_menu_kb(user):
     rows = [
         [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("👤 Akun Saya", callback_data="myaccounts")],
         [InlineKeyboardButton("➕ Buat Akun", callback_data="create_30")],
         [InlineKeyboardButton("💰 Saldo", callback_data="balance")],
     ]
@@ -64,6 +63,7 @@ def main_menu_kb(user):
     if user and user["role"] == "admin":
         rows.append([InlineKeyboardButton("💳 Topup", callback_data="topup_menu")])
         rows.append([InlineKeyboardButton("⚙️ Config", callback_data="config_menu")])
+    rows.append([InlineKeyboardButton("👤 Akun Saya", callback_data="myaccounts")])
     return InlineKeyboardMarkup(rows)
 
 
