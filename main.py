@@ -11,6 +11,7 @@ if not API_TOKEN or API_TOKEN == "change-me":
         API_TOKEN = "change-me"
 DB_PATH = os.environ.get("BOT_DB", "/root/natssh-bot/bot.db")
 ADMIN_IDS = set(int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x)
+ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "admin")
 PRICE_30D = int(os.environ.get("PRICE_30D", "5000"))
 
 
@@ -70,6 +71,7 @@ def main_menu_kb(user):
         [InlineKeyboardButton("📊 Status", callback_data="status")],
         [InlineKeyboardButton("➕ Buat Akun", callback_data="create_30")],
         [InlineKeyboardButton("💳 Topup", callback_data="topup_request")],
+        [InlineKeyboardButton("📞 Hubungi Admin", callback_data="contact_admin")],
         [InlineKeyboardButton("💰 Saldo", callback_data="balance")],
     ]
     if user and user["role"] in ("admin", "operator"):
@@ -271,6 +273,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             f"Topup mandiri:\n1) Transfer ke QRIS statis.\n2) Kode unik: {code}\n3) Kirim bukti ke admin.\nAdmin akan approve dengan /approve_topup <id> <amount>.",
             reply_markup=main_menu_kb(u))
+        return
+
+    if data == "contact_admin":
+        await q.edit_message_text(f"Hubungi admin: {ADMIN_CONTACT}", reply_markup=main_menu_kb(u))
         return
 
     await q.edit_message_text("Unknown action.", reply_markup=main_menu_kb(u))
