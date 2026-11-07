@@ -84,6 +84,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Menu utama:", reply_markup=main_menu_kb(u))
 
 
+async def topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    u = get_user(tid)
+    if not u or u["role"] != "admin":
+        await update.message.reply_text("Tidak diizinkan.")
+        return
+    if not context.args or len(context.args) != 2:
+        await update.message.reply_text("Usage: /topup <telegram_id> <amount>")
+        return
+    try:
+        target_tid = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("telegram_id dan amount harus angka.")
+        return
+    if amount <= 0:
+        await update.message.reply_text("Amount harus > 0.")
+        return
+    target = ensure_user(target_tid)
+    con = db()
+    con.execute("UPDATE users SET balance=balance+? WHERE telegram_id=?", (amount, target_tid))
+    con.execute("INSERT INTO transactions (user_id, amount, type, note, created_at) VALUES (?,?,?,?,datetime('now'))",
+                (target["id"], amount, "topup", f"admin {tid}"))
+    con.commit()
+    row = con.execute("SELECT balance FROM users WHERE telegram_id=?", (target_tid,)).fetchone()
+    con.close()
+    await update.message.reply_text(f"Topup OK. Saldo {target_tid}: {row['balance']}")
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Gunakan tombol inline. /start untuk menu.")
 
@@ -189,7 +218,8 @@ def main():
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("topup", topup_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.run_polling()
 
