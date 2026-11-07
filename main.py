@@ -41,6 +41,18 @@ def get_user(tid):
     return row
 
 
+def ensure_user(tid):
+    u = get_user(tid)
+    if u:
+        return u
+    con = db()
+    con.execute("INSERT OR IGNORE INTO users (telegram_id, role, balance) VALUES (?,?,0)", (tid, "customer"))
+    con.commit()
+    row = con.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
+    con.close()
+    return row
+
+
 def api(path, method="GET", **kw):
     headers = {"X-API-Token": API_TOKEN}
     url = f"{API_URL}{path}"
@@ -68,7 +80,7 @@ def main_menu_kb(user):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = get_user(update.effective_user.id)
+    u = ensure_user(update.effective_user.id)
     await update.message.reply_text("Menu utama:", reply_markup=main_menu_kb(u))
 
 
