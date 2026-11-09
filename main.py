@@ -46,10 +46,16 @@ def get_user(tid):
 
 def ensure_user(tid):
     u = get_user(tid)
+    role = "admin" if tid in ADMIN_IDS else "customer"
     if u:
-        return u
+        if u["role"] != role and tid in ADMIN_IDS:
+            con = db()
+            con.execute("UPDATE users SET role=? WHERE telegram_id=?", (role, tid))
+            con.commit()
+            con.close()
+        return get_user(tid)
     con = db()
-    con.execute("INSERT OR IGNORE INTO users (telegram_id, role, balance) VALUES (?,?,0)", (tid, "customer"))
+    con.execute("INSERT OR IGNORE INTO users (telegram_id, role, balance) VALUES (?,?,0)", (tid, role))
     con.commit()
     row = con.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
     con.close()
@@ -67,20 +73,21 @@ def gen_pass(n=12):
 
 
 def main_menu_kb(user):
-    rows = [
-        [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("➕ Buat Akun", callback_data="create_30")],
-        [InlineKeyboardButton("💳 Topup", callback_data="topup_request")],
-        [InlineKeyboardButton("📞 Hubungi Admin", callback_data="contact_admin")],
-        [InlineKeyboardButton("💰 Saldo", callback_data="balance")],
-    ]
-    if user and user["role"] in ("admin", "operator"):
+    rows = []
+    role = user["role"] if user else None
+    if role in ("customer", "reseller", None):
+        rows.append([InlineKeyboardButton("➕ Buat Akun", callback_data="create_30")])
+        rows.append([InlineKeyboardButton("💳 Topup", callback_data="topup_request")])
+    if role in ("admin", "operator"):
+        rows.append([InlineKeyboardButton("📊 Status", callback_data="status_menu")])
         rows.append([InlineKeyboardButton("📋 Daftar Akun", callback_data="accounts")])
-        rows.append([InlineKeyboardButton("⛔ Suspend", callback_data="suspend_menu")])
-    if user and user["role"] == "admin":
+    if role == "admin":
         rows.append([InlineKeyboardButton("💳 Topup", callback_data="topup_menu")])
-        rows.append([InlineKeyboardButton("⚙️ Config", callback_data="config_menu")])
     rows.append([InlineKeyboardButton("👤 Akun Saya", callback_data="myaccounts")])
+    if role != "admin":
+        rows.append([InlineKeyboardButton("📞 Hubungi Admin", callback_data="contact_admin")])
+    if role == "admin":
+        rows.append([InlineKeyboardButton("⚙️ Konfigurasi", callback_data="info")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -169,6 +176,26 @@ async def approve_topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Approved #{req_id}. Saldo user {target_tid}: {row['balance']}")
 
 
+async def passwd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    u = get_user(tid)
+    if not u or u["role"] != "admin":
+        await update.message.reply_text("Tidak diizinkan.")
+        return
+    if not context.args or len(context.args) != 2:
+        await update.message.reply_text("Usage: /passwd <ssh_user> <password_baru>")
+        return
+    ssh_user, new_pass = context.args[0], context.args[1]
+    if len(new_pass) < 6:
+        await update.message.reply_text("Password minimal 6 karakter.")
+        return
+    r = api(f"/accounts/{ssh_user}/password", method="POST", json={"password": new_pass})
+    if r.status_code != 200:
+        await update.message.reply_text(f"Gagal: {r.text}")
+        return
+    await update.message.reply_text(f"Password {ssh_user} berhasil diubah.")
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Gunakan tombol inline. /start untuk menu.")
 
@@ -179,8 +206,23 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     uid = q.from_user.id
     u = get_user(uid)
+    role = u["role"] if u else None
+
+    admin_only = {"accounts", "suspend_menu", "topup_menu", "config_menu", "topup_requests"}
+    operator_ok = {"status", "accounts", "suspend_menu"}
+    if data in ("accounts", "suspend_menu", "topup_menu", "config_menu"):
+        if role not in ("admin", "operator"):
+            await q.answer("Tidak diizinkan.", show_alert=True)
+            return
+    if data in ("topup_menu", "config_menu"):
+        if role != "admin":
+            await q.answer("Tidak diizinkan.", show_alert=True)
+            return
 
     if data == "status":
+        if role not in ("admin", "operator"):
+            await q.answer("Tidak diizinkan.", show_alert=True)
+            return
         r = api("/status")
         await q.edit_message_text(str(r.json()), reply_markup=main_menu_kb(u))
         return
@@ -279,6 +321,95 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"Hubungi admin: {ADMIN_CONTACT}", reply_markup=main_menu_kb(u))
         return
 
+    if data == "info":
+        r = api("/info")
+        await q.edit_message_text(str(r.json()), reply_markup=main_menu_kb(u))
+        return
+
+    if data == "status_menu":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Status Server", callback_data="status_server")],
+            [InlineKeyboardButton("Info Server", callback_data="status_info")],
+            [InlineKeyboardButton("System Resources", callback_data="status_system")],
+            [InlineKeyboardButton("Ws Peak", callback_data="status_wspeak")],
+            [InlineKeyboardButton("Riwayat", callback_data="status_history")],
+            [InlineKeyboardButton("Kembali", callback_data="back_main")],
+        ])
+        await q.edit_message_text("Menu Status:", reply_markup=kb)
+        return
+
+    if data == "status_server":
+        r = api("/status").json()
+        lr = api("/live").json()
+        sessions = lr.get("live", [])
+        lines = [
+            "Status Server:",
+            "──────────────",
+            f"WS: {r.get('ws')}",
+            f"Live connections: {r.get('live_connections')}",
+            "──────────────",
+            "Sesi Live:",
+        ]
+        if not sessions:
+            lines.append("Tidak ada sesi live.")
+        else:
+            for s in sessions:
+                city = s.get("city") or "-"
+                lines.append(f"- {s.get('ip')} | {city} | up={s.get('up')} down={s.get('down')}")
+        await q.message.reply_text("\n".join(lines))
+        await q.answer()
+        return
+
+    if data == "status_info":
+        r = api("/info").json()
+        text = f"Host: {r.get('host')}\nCF Port: {r.get('cf_port')}\nWS Port: {r.get('ws_port')}"
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Kembali", callback_data="status_menu")]]))
+        return
+
+    if data == "status_system":
+        r = api("/system").json()
+        text = f"RAM: {r.get('ram')}\nCPU: {r.get('cpu')}\nDisk: {r.get('disk')}"
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Kembali", callback_data="status_menu")]]))
+        return
+
+    if data == "status_wspeak":
+        r = api("/ws_peak").json()
+        text = f"Puncak: {r.get('peak')} slot\nDitolak: {r.get('tolak')}x\nBatas: {r.get('max_total')} slot"
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Kembali", callback_data="status_menu")]]))
+        return
+
+    if data == "status_history":
+        r = api("/accounts").json()
+        accounts = r.get("accounts", [])
+        kb = []
+        for a in accounts:
+            u = a.get("user")
+            if not u or not os.path.isdir(f"/home/{u}"):
+                continue
+            kb.append([InlineKeyboardButton(u, callback_data=f"hist_{u}")])
+        kb.append([InlineKeyboardButton("Kembali", callback_data="status_menu")])
+        await q.edit_message_text("Pilih akun untuk lihat riwayat:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("hist_"):
+        user = data[5:]
+        r = api(f"/accounts/{user}/history").json()
+        rows = r.get("history", [])
+        if not rows:
+            text = "Tidak ada riwayat."
+        else:
+            lines = [f"Riwayat {user} ({len(rows)} sesi):", "──────────────"]
+            for i, row in enumerate(rows, 1):
+                lines.append(f"{i}. {row}")
+            text = "\n".join(lines)
+        await q.message.reply_text(text)
+        await q.answer()
+        return
+
+    if data == "back_main":
+        await q.edit_message_text("Menu utama:", reply_markup=main_menu_kb(u))
+        return
+
     await q.edit_message_text("Unknown action.", reply_markup=main_menu_kb(u))
 
 
@@ -297,6 +428,7 @@ def main():
     app.add_handler(CommandHandler("topup", topup_cmd))
     app.add_handler(CommandHandler("topup_requests", topup_requests_cmd))
     app.add_handler(CommandHandler("approve_topup", approve_topup_cmd))
+    app.add_handler(CommandHandler("passwd", passwd_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.run_polling()
 
